@@ -6,7 +6,6 @@ import {
     type CompletionRecord,
     type Frequency,
     type Preferences,
-    type Priority,
     type TaskDefinition,
     type WorldFilter,
 } from './tasks';
@@ -20,13 +19,26 @@ type RenderableTask = {
     world: number | 0;
 };
 
+type GroupedTasks = {
+    key: string;
+    world: number;
+    system: string;
+    items: RenderableTask[];
+    completed: number;
+    total: number;
+};
+
+type StoredPreferences = Partial<Preferences> & {
+    hiddenTaskIds?: string[];
+};
+
 const STORAGE_KEYS = {
     completions: 'idleon-checklist-v1-completions',
     preferences: 'idleon-checklist-v1-preferences',
     characters: 'idleon-checklist-v1-characters',
 };
 
-function getPeriodKey(frequency: Frequency) {
+function getPeriodKey(frequency: Frequency): string {
     const now = new Date();
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
@@ -40,19 +52,24 @@ function getPeriodKey(frequency: Frequency) {
         return `${year}-${month}`;
     }
 
-    const start = new Date(now);
-    const currentDay = start.getDay();
+    const monday = new Date(now);
+    const currentDay = monday.getDay();
     const distanceFromMonday = (currentDay + 6) % 7;
-    start.setDate(start.getDate() - distanceFromMonday);
+    monday.setDate(monday.getDate() - distanceFromMonday);
 
-    const weekYear = start.getFullYear();
-    const weekMonth = String(start.getMonth() + 1).padStart(2, '0');
-    const weekDay = String(start.getDate()).padStart(2, '0');
+    const weekYear = monday.getFullYear();
+    const weekMonth = String(monday.getMonth() + 1).padStart(2, '0');
+    const weekDay = String(monday.getDate()).padStart(2, '0');
+
     return `${weekYear}-${weekMonth}-${weekDay}`;
 }
 
-function buildCompletionKey(taskId: string, characterId: string | null, periodKey: string) {
+function buildCompletionKey(taskId: string, characterId: string | null, periodKey: string): string {
     return `${taskId}::${characterId ?? 'account'}::${periodKey}`;
+}
+
+function buildVisibilityKey(taskId: string, characterId: string | null): string {
+    return `${taskId}::${characterId ?? 'account'}`;
 }
 
 function loadJson<T>(key: string, fallback: T): T {
@@ -69,7 +86,7 @@ function loadJson<T>(key: string, fallback: T): T {
     }
 }
 
-function saveJson<T>(key: string, value: T) {
+function saveJson<T>(key: string, value: T): void {
     if (typeof window === 'undefined') {
         return;
     }
@@ -77,7 +94,31 @@ function saveJson<T>(key: string, value: T) {
     window.localStorage.setItem(key, JSON.stringify(value));
 }
 
-function priorityWeight(priority: Priority) {
+function normalizePreferences(value: StoredPreferences | undefined): Preferences {
+    return {
+        hiddenTaskKeys: Array.isArray(value?.hiddenTaskKeys)
+            ? value.hiddenTaskKeys
+            : Array.isArray(value?.hiddenTaskIds)
+                ? value.hiddenTaskIds
+                : [],
+        favoriteTaskIds: Array.isArray(value?.favoriteTaskIds) ? value.favoriteTaskIds : [],
+        hideCompleted: typeof value?.hideCompleted === 'boolean' ? value.hideCompleted : false,
+    };
+}
+
+function worldLabel(world: number | 0): string {
+    if (world === 0) {
+        return 'Global';
+    }
+
+    return `World ${world}`;
+}
+
+function capitalize(value: string): string {
+    return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function priorityWeight(priority: TaskDefinition['priority']): number {
     if (priority === 'high') {
         return 3;
     }
@@ -89,18 +130,6 @@ function priorityWeight(priority: Priority) {
     return 1;
 }
 
-function worldLabel(world: number | 0) {
-    if (world === 0) {
-        return 'Global';
-    }
-
-    return `World ${world}`;
-}
-
-function capitalize(value: string) {
-    return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
 function buttonStyle(active: boolean): React.CSSProperties {
     return {
         ...styles.button,
@@ -108,34 +137,21 @@ function buttonStyle(active: boolean): React.CSSProperties {
     };
 }
 
-function priorityBadgeStyle(priority: Priority): React.CSSProperties {
-    if (priority === 'high') {
-        return styles.priorityHigh;
-    }
-
-    if (priority === 'medium') {
-        return styles.priorityMedium;
-    }
-
-    return styles.priorityLow;
-}
-
 function SectionTitle({ children }: { children: React.ReactNode }) {
     return <div style={styles.sectionTitle}>{children}</div>;
 }
 
-export default function IdleonChecklistAppCompactV1() {
+export default function App() {
     const [frequency, setFrequency] = useState<Frequency>('daily');
     const [worldFilter, setWorldFilter] = useState<WorldFilter>('all');
     const [search, setSearch] = useState('');
     const [showOptional, setShowOptional] = useState(true);
     const [selectedCharacterId, setSelectedCharacterId] = useState<string>('all');
-    const [expandedSystems, setExpandedSystems] = useState<Record<string, boolean>>({});
 
     const [characters, setCharacters] = useState<CharacterProfile[]>(charactersSeed);
     const [completions, setCompletions] = useState<CompletionRecord[]>([]);
     const [preferences, setPreferences] = useState<Preferences>({
-        hiddenTaskIds: [],
+        hiddenTaskKeys: [],
         favoriteTaskIds: [],
         hideCompleted: false,
     });
@@ -143,11 +159,15 @@ export default function IdleonChecklistAppCompactV1() {
     useEffect(() => {
         setCharacters(loadJson<CharacterProfile[]>(STORAGE_KEYS.characters, charactersSeed));
         setCompletions(loadJson<CompletionRecord[]>(STORAGE_KEYS.completions, []));
-        setPreferences(loadJson<Preferences>(STORAGE_KEYS.preferences, {
-            hiddenTaskIds: [],
-            favoriteTaskIds: [],
-            hideCompleted: false,
-        }));
+        setPreferences(
+            normalizePreferences(
+                loadJson<StoredPreferences>(STORAGE_KEYS.preferences, {
+                    hiddenTaskKeys: [],
+                    favoriteTaskIds: [],
+                    hideCompleted: false,
+                }),
+            ),
+        );
     }, []);
 
     useEffect(() => {
@@ -186,10 +206,6 @@ export default function IdleonChecklistAppCompactV1() {
                 continue;
             }
 
-            if (preferences.hiddenTaskIds.includes(task.id)) {
-                continue;
-            }
-
             if (!showOptional && task.optional) {
                 continue;
             }
@@ -222,6 +238,12 @@ export default function IdleonChecklistAppCompactV1() {
             }
 
             if (task.scope === 'account') {
+                const visibilityKey = buildVisibilityKey(task.id, null);
+
+                if (preferences.hiddenTaskKeys.includes(visibilityKey)) {
+                    continue;
+                }
+
                 const completionKey = buildCompletionKey(task.id, null, currentPeriodKey);
                 const isComplete = completionSet.has(completionKey);
 
@@ -237,6 +259,7 @@ export default function IdleonChecklistAppCompactV1() {
                     completionKey,
                     world: task.world,
                 });
+
                 continue;
             }
 
@@ -248,6 +271,12 @@ export default function IdleonChecklistAppCompactV1() {
 
                 const classAllowed = !task.requiresClasses || task.requiresClasses.includes(character.classGroup);
                 if (!classAllowed) {
+                    continue;
+                }
+
+                const visibilityKey = buildVisibilityKey(task.id, character.id);
+
+                if (preferences.hiddenTaskKeys.includes(visibilityKey)) {
                     continue;
                 }
 
@@ -282,7 +311,10 @@ export default function IdleonChecklistAppCompactV1() {
                 return a.world - b.world;
             }
 
-            const favoriteDelta = Number(preferences.favoriteTaskIds.includes(b.task.id)) - Number(preferences.favoriteTaskIds.includes(a.task.id));
+            const favoriteDelta =
+                Number(preferences.favoriteTaskIds.includes(b.task.id)) -
+                Number(preferences.favoriteTaskIds.includes(a.task.id));
+
             if (favoriteDelta !== 0) {
                 return favoriteDelta;
             }
@@ -298,9 +330,21 @@ export default function IdleonChecklistAppCompactV1() {
 
             return a.task.title.localeCompare(b.task.title);
         });
-    }, [completionSet, currentPeriodKey, enabledCharacters, frequency, preferences.favoriteTaskIds, preferences.hiddenTaskIds, preferences.hideCompleted, search, selectedCharacterId, showOptional, worldFilter]);
+    }, [
+        completionSet,
+        currentPeriodKey,
+        enabledCharacters,
+        frequency,
+        preferences.favoriteTaskIds,
+        preferences.hiddenTaskKeys,
+        preferences.hideCompleted,
+        search,
+        selectedCharacterId,
+        showOptional,
+        worldFilter,
+    ]);
 
-    const groupedTasks = useMemo(() => {
+    const groupedTasks = useMemo<GroupedTasks[]>(() => {
         const groups = new Map<string, RenderableTask[]>();
 
         for (const item of renderableTasks) {
@@ -313,6 +357,7 @@ export default function IdleonChecklistAppCompactV1() {
         return Array.from(groups.entries()).map(([key, items]) => {
             const [world, system] = key.split('::');
             const completed = items.filter((item) => item.isComplete).length;
+
             return {
                 key,
                 world: Number(world),
@@ -329,12 +374,19 @@ export default function IdleonChecklistAppCompactV1() {
         const completed = renderableTasks.filter((task) => task.isComplete).length;
         const remaining = total - completed;
         const percent = total === 0 ? 0 : Math.round((completed / total) * 100);
-        return { total, completed, remaining, percent };
+
+        return {
+            total,
+            completed,
+            remaining,
+            percent,
+        };
     }, [renderableTasks]);
 
-    function toggleTask(item: RenderableTask) {
+    function toggleTask(item: RenderableTask): void {
         setCompletions((current) => {
             const exists = current.some((record) => record.key === item.completionKey);
+
             if (exists) {
                 return current.filter((record) => record.key !== item.completionKey);
             }
@@ -351,9 +403,10 @@ export default function IdleonChecklistAppCompactV1() {
         });
     }
 
-    function toggleFavorite(taskId: string) {
+    function toggleFavorite(taskId: string): void {
         setPreferences((current) => {
             const exists = current.favoriteTaskIds.includes(taskId);
+
             return {
                 ...current,
                 favoriteTaskIds: exists
@@ -363,42 +416,39 @@ export default function IdleonChecklistAppCompactV1() {
         });
     }
 
-    function hideTask(taskId: string) {
+    function hideTask(taskId: string, characterId: string | null): void {
+        const visibilityKey = buildVisibilityKey(taskId, characterId);
+
         setPreferences((current) => {
-            if (current.hiddenTaskIds.includes(taskId)) {
+            if (current.hiddenTaskKeys.includes(visibilityKey)) {
                 return current;
             }
 
             return {
                 ...current,
-                hiddenTaskIds: [...current.hiddenTaskIds, taskId],
+                hiddenTaskKeys: [...current.hiddenTaskKeys, visibilityKey],
             };
         });
     }
 
-    function resetCurrentFrequency() {
+    function resetCurrentFrequency(): void {
         setCompletions((current) => current.filter((record) => record.periodKey !== currentPeriodKey));
     }
 
-    function resetAllData() {
+    function resetAllData(): void {
         setCompletions([]);
         setPreferences({
-            hiddenTaskIds: [],
+            hiddenTaskKeys: [],
             favoriteTaskIds: [],
             hideCompleted: false,
         });
         setCharacters(charactersSeed);
     }
 
-    function toggleSystem(groupKey: string) {
-        setExpandedSystems((current) => ({
-            ...current,
-            [groupKey]: !(current[groupKey] ?? true),
-        }));
-    }
-
-    function markCharacterVisibleDone(characterId: string) {
-        const visibleCharacterTasks = renderableTasks.filter((item) => item.character?.id === characterId && !item.isComplete);
+    function markCharacterVisibleDone(characterId: string): void {
+        const visibleCharacterTasks = renderableTasks.filter(
+            (item) => item.character?.id === characterId && !item.isComplete,
+        );
 
         setCompletions((current) => {
             const existingKeys = new Set(current.map((item) => item.key));
@@ -438,7 +488,12 @@ export default function IdleonChecklistAppCompactV1() {
                         <SectionTitle>Frequency</SectionTitle>
                         <div style={styles.buttonGrid3}>
                             {(['daily', 'weekly', 'monthly'] as Frequency[]).map((item) => (
-                                <button key={item} style={buttonStyle(frequency === item)} onClick={() => setFrequency(item)}>
+                                <button
+                                    key={item}
+                                    style={buttonStyle(frequency === item)}
+                                    onClick={() => setFrequency(item)}
+                                    type="button"
+                                >
                                     {capitalize(item)}
                                 </button>
                             ))}
@@ -448,12 +503,32 @@ export default function IdleonChecklistAppCompactV1() {
                     <div style={styles.panel}>
                         <SectionTitle>View</SectionTitle>
                         <div style={styles.buttonGrid2}>
-                            <button style={buttonStyle(worldFilter === 'all')} onClick={() => setWorldFilter('all')}>All Tasks</button>
-                            <button style={buttonStyle(worldFilter === 'favorites')} onClick={() => setWorldFilter('favorites')}>Favorites</button>
-                            <button style={buttonStyle(worldFilter === 'character')} onClick={() => setWorldFilter('character')}>Character</button>
+                            <button style={buttonStyle(worldFilter === 'all')} onClick={() => setWorldFilter('all')} type="button">
+                                All Tasks
+                            </button>
+                            <button
+                                style={buttonStyle(worldFilter === 'favorites')}
+                                onClick={() => setWorldFilter('favorites')}
+                                type="button"
+                            >
+                                Favorites
+                            </button>
+                            <button
+                                style={buttonStyle(worldFilter === 'character')}
+                                onClick={() => setWorldFilter('character')}
+                                type="button"
+                            >
+                                Character
+                            </button>
                             <button
                                 style={buttonStyle(preferences.hideCompleted)}
-                                onClick={() => setPreferences((current) => ({ ...current, hideCompleted: !current.hideCompleted }))}
+                                onClick={() =>
+                                    setPreferences((current) => ({
+                                        ...current,
+                                        hideCompleted: !current.hideCompleted,
+                                    }))
+                                }
+                                type="button"
                             >
                                 {preferences.hideCompleted ? 'Hide Completed On' : 'Hide Completed Off'}
                             </button>
@@ -463,9 +538,16 @@ export default function IdleonChecklistAppCompactV1() {
                     <div style={styles.panel}>
                         <SectionTitle>Worlds</SectionTitle>
                         <div style={styles.buttonGrid2}>
-                            <button style={buttonStyle(worldFilter === 0)} onClick={() => setWorldFilter(0)}>Global</button>
+                            <button style={buttonStyle(worldFilter === 0)} onClick={() => setWorldFilter(0)} type="button">
+                                Global
+                            </button>
                             {[1, 2, 3, 4, 5, 6, 7].map((world) => (
-                                <button key={world} style={buttonStyle(worldFilter === world)} onClick={() => setWorldFilter(world)}>
+                                <button
+                                    key={world}
+                                    style={buttonStyle(worldFilter === world)}
+                                    onClick={() => setWorldFilter(world)}
+                                    type="button"
+                                >
                                     World {world}
                                 </button>
                             ))}
@@ -477,19 +559,31 @@ export default function IdleonChecklistAppCompactV1() {
                             <SectionTitle>Characters</SectionTitle>
                             <span style={styles.smallBadge}>{enabledCharacters.length}</span>
                         </div>
+
                         <div style={styles.characterList}>
-                            <button style={buttonStyle(selectedCharacterId === 'all')} onClick={() => setSelectedCharacterId('all')}>
+                            <button
+                                style={buttonStyle(selectedCharacterId === 'all')}
+                                onClick={() => setSelectedCharacterId('all')}
+                                type="button"
+                            >
                                 All Characters
                             </button>
+
                             {enabledCharacters.map((character) => (
                                 <div key={character.id} style={styles.characterRow}>
                                     <button
                                         style={{ ...buttonStyle(selectedCharacterId === character.id), flex: 1 }}
                                         onClick={() => setSelectedCharacterId(character.id)}
+                                        type="button"
                                     >
                                         {character.name}
                                     </button>
-                                    <button style={styles.secondaryButton} onClick={() => markCharacterVisibleDone(character.id)} title="Mark visible tasks done">
+                                    <button
+                                        style={styles.secondaryButton}
+                                        onClick={() => markCharacterVisibleDone(character.id)}
+                                        title="Mark visible tasks done"
+                                        type="button"
+                                    >
                                         ✓
                                     </button>
                                 </div>
@@ -499,10 +593,10 @@ export default function IdleonChecklistAppCompactV1() {
 
                     <div style={styles.panel}>
                         <div style={styles.actionColumn}>
-                            <button style={styles.secondaryButtonWide} onClick={resetCurrentFrequency}>
+                            <button style={styles.secondaryButtonWide} onClick={resetCurrentFrequency} type="button">
                                 Reset Current {capitalize(frequency)}
                             </button>
-                            <button style={styles.secondaryButtonWide} onClick={resetAllData}>
+                            <button style={styles.secondaryButtonWide} onClick={resetAllData} type="button">
                                 Clear All Saved Data
                             </button>
                         </div>
@@ -527,7 +621,11 @@ export default function IdleonChecklistAppCompactV1() {
 
                         <div style={styles.panelSmall}>
                             <div style={styles.centerText}>
-                                {worldFilter === 'all' ? 'All views' : typeof worldFilter === 'number' ? worldLabel(worldFilter) : capitalize(String(worldFilter))}
+                                {worldFilter === 'all'
+                                    ? 'All views'
+                                    : typeof worldFilter === 'number'
+                                        ? worldLabel(worldFilter)
+                                        : capitalize(String(worldFilter))}
                             </div>
                         </div>
                     </div>
@@ -540,7 +638,11 @@ export default function IdleonChecklistAppCompactV1() {
                                 placeholder="Search task, world, system, tag, or character..."
                                 style={styles.input}
                             />
-                            <button style={styles.secondaryButtonWide} onClick={() => setShowOptional((current) => !current)}>
+                            <button
+                                style={styles.secondaryButtonWide}
+                                onClick={() => setShowOptional((current) => !current)}
+                                type="button"
+                            >
                                 {showOptional ? 'Optional On' : 'Optional Off'}
                             </button>
                         </div>
@@ -550,73 +652,75 @@ export default function IdleonChecklistAppCompactV1() {
                                 <div style={styles.emptyState}>No tasks match the current filters.</div>
                             )}
 
-                            {groupedTasks.map((group) => {
-                                const isExpanded = expandedSystems[group.key] ?? true;
-                                return (
-                                    <div key={group.key} style={styles.groupCard}>
-                                        <div style={styles.groupHeader}>
-                                            <div>
-                                                <div style={styles.groupTitle}>{group.system}</div>
-                                                <div style={styles.groupMeta}>{worldLabel(group.world)} · {group.completed}/{group.total} complete</div>
-                                            </div>
-                                            <div style={styles.groupHeaderActions}>
-                                                <span style={styles.smallBadge}>{group.total}</span>
-                                                <button style={styles.iconButton} onClick={() => toggleSystem(group.key)} type="button">
-                                                    {isExpanded ? 'Collapse' : 'Expand'}
-                                                </button>
+                            {groupedTasks.map((group) => (
+                                <div key={group.key} style={styles.groupBlock}>
+                                    <div style={styles.groupHeader}>
+                                        <div>
+                                            <div style={styles.groupTitle}>{group.system}</div>
+                                            <div style={styles.groupMeta}>
+                                                {worldLabel(group.world)} · {group.completed}/{group.total} complete
                                             </div>
                                         </div>
+                                        <span style={styles.smallBadge}>{group.total}</span>
+                                    </div>
 
-                                        {isExpanded && (
-                                            <div style={styles.groupContent}>
-                                                {group.items.map((item) => {
-                                                    const isFavorite = preferences.favoriteTaskIds.includes(item.task.id);
+                                    <div style={styles.rows}>
+                                        {group.items.map((item) => {
+                                            const isFavorite = preferences.favoriteTaskIds.includes(item.task.id);
 
-                                                    return (
-                                                        <div key={item.renderKey} style={item.isComplete ? styles.taskDone : styles.taskCard}>
-                                                            <div style={styles.rowLeft}>
-                                                                <input
-                                                                    type="checkbox"
-                                                                    checked={item.isComplete}
-                                                                    onChange={() => toggleTask(item)}
-                                                                    style={styles.checkbox}
-                                                                />
-                                                                <div style={styles.rowContent}>
-                                                                    <div style={styles.rowTop}>
-                                                                        <div style={{ ...styles.taskTitle, ...(item.isComplete ? styles.taskTitleDone : {}) }}>
-                                                                            {item.task.title}
-                                                                        </div>
-                                                                        <div style={styles.inlineBadges}>
-                                                                            <span style={styles.categoryBadge}>{item.task.category}</span>
-                                                                            <span style={priorityBadgeStyle(item.task.priority)}>{capitalize(item.task.priority)}</span>
-                                                                            {item.task.optional && <span style={styles.optionalBadge}>Optional</span>}
-                                                                        </div>
-                                                                    </div>
-                                                                    <div style={styles.taskMetaCompact}>
-                                                                        {item.character ? `${item.character.name} · ${item.character.classGroup}` : 'Account-wide'}
-                                                                        {' · '}
-                                                                        {worldLabel(item.task.world)}
-                                                                        {' · '}
-                                                                        {item.task.system}
-                                                                    </div>
-                                                                </div>
+                                            return (
+                                                <div
+                                                    key={item.renderKey}
+                                                    style={item.isComplete ? styles.taskDone : styles.taskRow}
+                                                >
+                                                    <label style={styles.taskMain}>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={item.isComplete}
+                                                            onChange={() => toggleTask(item)}
+                                                            style={styles.checkbox}
+                                                        />
+                                                        <div style={styles.taskTextWrap}>
+                                                            <div
+                                                                style={{
+                                                                    ...styles.taskTitle,
+                                                                    ...(item.isComplete ? styles.taskTitleDone : {}),
+                                                                }}
+                                                            >
+                                                                {item.task.title}
                                                             </div>
-                                                            <div style={styles.taskActionsInline}>
-                                                                <button style={styles.iconButton} onClick={() => toggleFavorite(item.task.id)} type="button">
-                                                                    {isFavorite ? '★' : '☆'}
-                                                                </button>
-                                                                <button style={styles.iconButton} onClick={() => hideTask(item.task.id)} type="button">
-                                                                    Hide
-                                                                </button>
+                                                            <div style={styles.taskMeta}>
+                                                                {item.character
+                                                                    ? `${item.character.name} · ${item.character.classGroup}`
+                                                                    : 'Account-wide'}
+                                                                {' · '}
+                                                                {worldLabel(item.task.world)}
                                                             </div>
                                                         </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        )}
+                                                    </label>
+
+                                                    <div style={styles.taskRight}>
+                                                        <button
+                                                            style={styles.iconButton}
+                                                            onClick={() => toggleFavorite(item.task.id)}
+                                                            type="button"
+                                                        >
+                                                            {isFavorite ? '★' : '☆'}
+                                                        </button>
+                                                        <button
+                                                            style={styles.iconButton}
+                                                            onClick={() => hideTask(item.task.id, item.character?.id ?? null)}
+                                                            type="button"
+                                                        >
+                                                            Hide
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
-                                );
-                            })}
+                                </div>
+                            ))}
                         </div>
                     </div>
                 </main>
@@ -756,6 +860,7 @@ const styles: Record<string, React.CSSProperties> = {
         padding: '4px 9px',
         fontSize: '12px',
         fontWeight: 700,
+        flexShrink: 0,
     },
     characterList: {
         display: 'flex',
@@ -826,7 +931,7 @@ const styles: Record<string, React.CSSProperties> = {
         overflowY: 'auto',
         display: 'flex',
         flexDirection: 'column',
-        gap: '10px',
+        gap: '12px',
         paddingRight: '4px',
     },
     emptyState: {
@@ -839,26 +944,16 @@ const styles: Record<string, React.CSSProperties> = {
         color: '#94a3b8',
         background: '#020617',
     },
-    groupCard: {
-        border: '1px solid #1e293b',
-        borderRadius: '14px',
-        overflow: 'hidden',
-        background: '#020617',
+    groupBlock: {
+        borderBottom: '1px solid #1e293b',
+        paddingBottom: '6px',
     },
     groupHeader: {
-        background: '#0f172a',
-        color: '#e2e8f0',
-        borderBottom: '1px solid #1e293b',
-        padding: '10px 14px',
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
         gap: '10px',
-    },
-    groupHeaderActions: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
+        padding: '4px 0 8px 0',
     },
     groupTitle: {
         fontWeight: 700,
@@ -867,136 +962,88 @@ const styles: Record<string, React.CSSProperties> = {
     groupMeta: {
         color: '#94a3b8',
         fontSize: '12px',
-        marginTop: '3px',
+        marginTop: '2px',
     },
-    groupContent: {
-        padding: 0,
+    rows: {
         display: 'flex',
         flexDirection: 'column',
     },
-    taskCard: {
-        display: 'flex',
-        justifyContent: 'space-between',
+    taskRow: {
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) auto',
         alignItems: 'center',
-        gap: '12px',
-        padding: '10px 14px',
-        borderBottom: '1px solid #1e293b',
+        gap: '8px',
+        padding: '7px 0',
+        borderTop: '1px solid rgba(30, 41, 59, 0.7)',
         background: 'transparent',
     },
     taskDone: {
-        display: 'flex',
-        justifyContent: 'space-between',
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) auto',
         alignItems: 'center',
-        gap: '12px',
-        padding: '10px 14px',
-        borderBottom: '1px solid #1e293b',
-        background: 'rgba(16, 185, 129, 0.08)',
+        gap: '8px',
+        padding: '7px 0',
+        borderTop: '1px solid rgba(30, 41, 59, 0.7)',
+        background: 'transparent',
+        opacity: 0.8,
     },
-    rowLeft: {
+    taskMain: {
         display: 'flex',
         alignItems: 'center',
         gap: '10px',
         minWidth: 0,
-        flex: 1,
-    },
-    rowContent: {
-        minWidth: 0,
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '4px',
-    },
-    rowTop: {
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: '12px',
     },
     checkbox: {
         width: '16px',
         height: '16px',
+        margin: 0,
         cursor: 'pointer',
         flexShrink: 0,
+        accentColor: '#4f46e5',
+    },
+    taskTextWrap: {
+        minWidth: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '2px',
     },
     taskTitle: {
-        fontSize: '14px',
+        fontSize: '13px',
         fontWeight: 700,
         color: '#f8fafc',
+        lineHeight: 1.2,
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
     },
     taskTitleDone: {
         textDecoration: 'line-through',
-        color: '#bbf7d0',
-    },
-    inlineBadges: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '6px',
-        flexShrink: 0,
-    },
-    categoryBadge: {
-        background: '#1e293b',
-        color: '#cbd5e1',
-        borderRadius: '999px',
-        padding: '3px 8px',
-        fontSize: '11px',
-        fontWeight: 700,
-    },
-    priorityHigh: {
-        background: 'rgba(244, 63, 94, 0.18)',
-        color: '#fecdd3',
-        borderRadius: '999px',
-        padding: '3px 8px',
-        fontSize: '11px',
-        fontWeight: 700,
-    },
-    priorityMedium: {
-        background: 'rgba(56, 189, 248, 0.18)',
-        color: '#bae6fd',
-        borderRadius: '999px',
-        padding: '3px 8px',
-        fontSize: '11px',
-        fontWeight: 700,
-    },
-    priorityLow: {
-        background: '#334155',
-        color: '#cbd5e1',
-        borderRadius: '999px',
-        padding: '3px 8px',
-        fontSize: '11px',
-        fontWeight: 700,
-    },
-    optionalBadge: {
-        background: 'rgba(245, 158, 11, 0.18)',
-        color: '#fde68a',
-        borderRadius: '999px',
-        padding: '3px 8px',
-        fontSize: '11px',
-        fontWeight: 700,
-    },
-    taskMetaCompact: {
         color: '#94a3b8',
-        fontSize: '12px',
+    },
+    taskMeta: {
+        color: '#94a3b8',
+        fontSize: '11px',
+        lineHeight: 1.2,
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
     },
-    taskActionsInline: {
+    taskRight: {
         display: 'flex',
         alignItems: 'center',
-        gap: '8px',
+        gap: '6px',
         flexShrink: 0,
     },
     iconButton: {
         background: '#111827',
         color: '#cbd5e1',
         border: '1px solid #334155',
-        borderRadius: '10px',
-        padding: '7px 10px',
+        borderRadius: '8px',
+        padding: '5px 8px',
         cursor: 'pointer',
-        fontSize: '12px',
+        fontSize: '11px',
         fontWeight: 700,
+        lineHeight: 1.2,
+        whiteSpace: 'nowrap',
     },
 };

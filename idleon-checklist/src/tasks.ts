@@ -51,7 +51,7 @@ export type CompletionRecord = {
 };
 
 export type Preferences = {
-    hiddenTaskIds: string[];
+    hiddenTaskKeys: string[];
     favoriteTaskIds: string[];
     hideCompleted: boolean;
 };
