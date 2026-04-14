@@ -10,19 +10,29 @@ import {
     type WorldFilter,
 } from './tasks';
 
+type TaskGroupName =
+    | 'Class Specifics'
+    | 'Global'
+    | 'World 1'
+    | 'World 2'
+    | 'World 3'
+    | 'World 4'
+    | 'World 5'
+    | 'World 6'
+    | 'World 7';
+
 type RenderableTask = {
     renderKey: string;
     task: TaskDefinition;
     character: CharacterProfile | null;
     isComplete: boolean;
     completionKey: string;
-    world: number | 0;
+    groupName: TaskGroupName;
 };
 
 type GroupedTasks = {
-    key: string;
-    world: number;
-    system: string;
+    key: TaskGroupName;
+    title: TaskGroupName;
     items: RenderableTask[];
     completed: number;
     total: number;
@@ -37,6 +47,18 @@ const STORAGE_KEYS = {
     preferences: 'idleon-checklist-v1-preferences',
     characters: 'idleon-checklist-v1-characters',
 };
+
+const GROUP_ORDER: TaskGroupName[] = [
+    'Class Specifics',
+    'Global',
+    'World 1',
+    'World 2',
+    'World 3',
+    'World 4',
+    'World 5',
+    'World 6',
+    'World 7',
+];
 
 function getPeriodKey(frequency: Frequency): string {
     const now = new Date();
@@ -106,14 +128,6 @@ function normalizePreferences(value: StoredPreferences | undefined): Preferences
     };
 }
 
-function worldLabel(world: number | 0): string {
-    if (world === 0) {
-        return 'Global';
-    }
-
-    return `World ${world}`;
-}
-
 function capitalize(value: string): string {
     return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -128,6 +142,18 @@ function priorityWeight(priority: TaskDefinition['priority']): number {
     }
 
     return 1;
+}
+
+function getTaskGroupName(task: TaskDefinition): TaskGroupName {
+    if (task.scope === 'character') {
+        return 'Class Specifics';
+    }
+
+    if (task.world === 0) {
+        return 'Global';
+    }
+
+    return `World ${task.world}` as TaskGroupName;
 }
 
 function buttonStyle(active: boolean): React.CSSProperties {
@@ -225,9 +251,6 @@ export default function App() {
             const matchesSearch = [
                 task.title,
                 task.description ?? '',
-                task.system,
-                task.category,
-                ...task.tags,
             ]
                 .join(' ')
                 .toLowerCase()
@@ -236,6 +259,8 @@ export default function App() {
             if (!matchesSearch) {
                 continue;
             }
+
+            const groupName = getTaskGroupName(task);
 
             if (task.scope === 'account') {
                 const visibilityKey = buildVisibilityKey(task.id, null);
@@ -257,7 +282,7 @@ export default function App() {
                     character: null,
                     isComplete,
                     completionKey,
-                    world: task.world,
+                    groupName,
                 });
 
                 continue;
@@ -301,14 +326,15 @@ export default function App() {
                     character,
                     isComplete,
                     completionKey,
-                    world: task.world,
+                    groupName,
                 });
             }
         }
 
         return entries.sort((a, b) => {
-            if (a.world !== b.world) {
-                return a.world - b.world;
+            const groupDelta = GROUP_ORDER.indexOf(a.groupName) - GROUP_ORDER.indexOf(b.groupName);
+            if (groupDelta !== 0) {
+                return groupDelta;
             }
 
             const favoriteDelta =
@@ -322,10 +348,6 @@ export default function App() {
             const priorityDelta = priorityWeight(b.task.priority) - priorityWeight(a.task.priority);
             if (priorityDelta !== 0) {
                 return priorityDelta;
-            }
-
-            if (a.task.system !== b.task.system) {
-                return a.task.system.localeCompare(b.task.system);
             }
 
             return a.task.title.localeCompare(b.task.title);
@@ -345,28 +367,33 @@ export default function App() {
     ]);
 
     const groupedTasks = useMemo<GroupedTasks[]>(() => {
-        const groups = new Map<string, RenderableTask[]>();
+        const groups = new Map<TaskGroupName, RenderableTask[]>();
 
         for (const item of renderableTasks) {
-            const key = `${item.world}::${item.task.system}`;
-            const existing = groups.get(key) ?? [];
+            const existing = groups.get(item.groupName) ?? [];
             existing.push(item);
-            groups.set(key, existing);
+            groups.set(item.groupName, existing);
         }
 
-        return Array.from(groups.entries()).map(([key, items]) => {
-            const [world, system] = key.split('::');
-            const completed = items.filter((item) => item.isComplete).length;
+        return GROUP_ORDER
+            .map((groupName) => {
+                const items = groups.get(groupName) ?? [];
 
-            return {
-                key,
-                world: Number(world),
-                system,
-                items,
-                completed,
-                total: items.length,
-            };
-        });
+                if (items.length === 0) {
+                    return null;
+                }
+
+                const completed = items.filter((item) => item.isComplete).length;
+
+                return {
+                    key: groupName,
+                    title: groupName,
+                    items,
+                    completed,
+                    total: items.length,
+                };
+            })
+            .filter((group): group is GroupedTasks => group !== null);
     }, [renderableTasks]);
 
     const stats = useMemo(() => {
@@ -624,7 +651,7 @@ export default function App() {
                                 {worldFilter === 'all'
                                     ? 'All views'
                                     : typeof worldFilter === 'number'
-                                        ? worldLabel(worldFilter)
+                                        ? `World ${worldFilter}`
                                         : capitalize(String(worldFilter))}
                             </div>
                         </div>
@@ -635,7 +662,7 @@ export default function App() {
                             <input
                                 value={search}
                                 onChange={(event) => setSearch(event.target.value)}
-                                placeholder="Search task, world, system, tag, or character..."
+                                placeholder="Search task or description..."
                                 style={styles.input}
                             />
                             <button
@@ -656,9 +683,9 @@ export default function App() {
                                 <div key={group.key} style={styles.groupBlock}>
                                     <div style={styles.groupHeader}>
                                         <div>
-                                            <div style={styles.groupTitle}>{group.system}</div>
+                                            <div style={styles.groupTitle}>{group.title}</div>
                                             <div style={styles.groupMeta}>
-                                                {worldLabel(group.world)} · {group.completed}/{group.total} complete
+                                                {group.completed}/{group.total} complete
                                             </div>
                                         </div>
                                         <span style={styles.smallBadge}>{group.total}</span>
@@ -692,10 +719,13 @@ export default function App() {
                                                             <div style={styles.taskMeta}>
                                                                 {item.character
                                                                     ? `${item.character.name} · ${item.character.classGroup}`
-                                                                    : 'Account-wide'}
-                                                                {' · '}
-                                                                {worldLabel(item.task.world)}
+                                                                    : group.title}
                                                             </div>
+                                                            {item.task.description && (
+                                                                <div style={styles.taskDescription}>
+                                                                    {item.task.description}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     </label>
 
@@ -973,7 +1003,7 @@ const styles: Record<string, React.CSSProperties> = {
         gridTemplateColumns: 'minmax(0, 1fr) auto',
         alignItems: 'center',
         gap: '8px',
-        padding: '7px 0',
+        padding: '8px 0',
         borderTop: '1px solid rgba(30, 41, 59, 0.7)',
         background: 'transparent',
     },
@@ -982,21 +1012,21 @@ const styles: Record<string, React.CSSProperties> = {
         gridTemplateColumns: 'minmax(0, 1fr) auto',
         alignItems: 'center',
         gap: '8px',
-        padding: '7px 0',
+        padding: '8px 0',
         borderTop: '1px solid rgba(30, 41, 59, 0.7)',
         background: 'transparent',
         opacity: 0.8,
     },
     taskMain: {
         display: 'flex',
-        alignItems: 'center',
+        alignItems: 'flex-start',
         gap: '10px',
         minWidth: 0,
     },
     checkbox: {
         width: '16px',
         height: '16px',
-        margin: 0,
+        margin: '2px 0 0 0',
         cursor: 'pointer',
         flexShrink: 0,
         accentColor: '#4f46e5',
@@ -1005,16 +1035,13 @@ const styles: Record<string, React.CSSProperties> = {
         minWidth: 0,
         display: 'flex',
         flexDirection: 'column',
-        gap: '2px',
+        gap: '3px',
     },
     taskTitle: {
         fontSize: '13px',
         fontWeight: 700,
         color: '#f8fafc',
         lineHeight: 1.2,
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
     },
     taskTitleDone: {
         textDecoration: 'line-through',
@@ -1024,9 +1051,11 @@ const styles: Record<string, React.CSSProperties> = {
         color: '#94a3b8',
         fontSize: '11px',
         lineHeight: 1.2,
-        whiteSpace: 'nowrap',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
+    },
+    taskDescription: {
+        color: '#cbd5e1',
+        fontSize: '11px',
+        lineHeight: 1.35,
     },
     taskRight: {
         display: 'flex',
