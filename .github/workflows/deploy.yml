@@ -22,15 +22,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
+          cache-dependency-path: idleon-checklist/package-lock.json
 
       - name: Install dependencies
+        working-directory: idleon-checklist
         run: npm ci
 
       - name: Build
+        working-directory: idleon-checklist
         run: npm run build
 
       - name: Upload artifact
