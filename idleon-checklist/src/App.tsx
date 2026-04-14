@@ -45,7 +45,7 @@ type StoredPreferences = Partial<Preferences> & {
 const STORAGE_KEYS = {
     completions: 'idleon-checklist-v1-completions',
     preferences: 'idleon-checklist-v1-preferences',
-    characters: 'idleon-checklist-v1-characters',
+    characters: 'idleon-checklist-v2-characters',
 };
 
 const GROUP_ORDER: TaskGroupName[] = [
@@ -128,6 +128,21 @@ function normalizePreferences(value: StoredPreferences | undefined): Preferences
     };
 }
 
+function normalizeCharacters(value: CharacterProfile[] | undefined): CharacterProfile[] {
+    if (!Array.isArray(value)) {
+        return charactersSeed;
+    }
+
+    return value.map((character, index) => ({
+        ...character,
+        classGroup: Array.isArray(character.classGroup)
+            ? character.classGroup
+            : [character.classGroup],
+        enabled: typeof character.enabled === 'boolean' ? character.enabled : true,
+        sortOrder: typeof character.sortOrder === 'number' ? character.sortOrder : index + 1,
+    }));
+}
+
 function capitalize(value: string): string {
     return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -174,18 +189,16 @@ export default function App() {
     const [showOptional, setShowOptional] = useState(true);
     const [selectedCharacterId, setSelectedCharacterId] = useState<string>('all');
 
-    const [characters, setCharacters] = useState<CharacterProfile[]>(charactersSeed);
-    const [completions, setCompletions] = useState<CompletionRecord[]>([]);
-    const [preferences, setPreferences] = useState<Preferences>({
-        hiddenTaskKeys: [],
-        favoriteTaskIds: [],
-        hideCompleted: false,
-    });
+    const [characters, setCharacters] = useState<CharacterProfile[]>(
+    () => normalizeCharacters(loadJson<CharacterProfile[]>(STORAGE_KEYS.characters, charactersSeed)),
+);
 
-    useEffect(() => {
-        setCharacters(loadJson<CharacterProfile[]>(STORAGE_KEYS.characters, charactersSeed));
-        setCompletions(loadJson<CompletionRecord[]>(STORAGE_KEYS.completions, []));
-        setPreferences(
+    const [completions, setCompletions] = useState<CompletionRecord[]>(
+        () => loadJson<CompletionRecord[]>(STORAGE_KEYS.completions, []),
+    );
+
+    const [preferences, setPreferences] = useState<Preferences>(
+        () =>
             normalizePreferences(
                 loadJson<StoredPreferences>(STORAGE_KEYS.preferences, {
                     hiddenTaskKeys: [],
@@ -193,8 +206,7 @@ export default function App() {
                     hideCompleted: false,
                 }),
             ),
-        );
-    }, []);
+    );
 
     useEffect(() => {
         saveJson(STORAGE_KEYS.characters, characters);
@@ -294,7 +306,11 @@ export default function App() {
                     continue;
                 }
 
-                const classAllowed = !task.requiresClasses || task.requiresClasses.includes(character.classGroup);
+                const requiredClasses = task.requiresClasses ?? [];
+                const classAllowed =
+                    requiredClasses.length === 0 ||
+                    character.classGroup.some((className) => requiredClasses.includes(className));
+
                 if (!classAllowed) {
                     continue;
                 }
@@ -312,9 +328,9 @@ export default function App() {
                     continue;
                 }
 
-                const characterSearchMatches = `${task.title} ${character.name} ${character.classGroup}`
-                    .toLowerCase()
-                    .includes(search.toLowerCase());
+const characterSearchMatches = `${task.title} ${character.name} ${character.classGroup.join(' ')}`
+    .toLowerCase()
+    .includes(search.toLowerCase());
 
                 if (search && !characterSearchMatches && !matchesSearch) {
                     continue;
@@ -717,9 +733,7 @@ export default function App() {
                                                                 {item.task.title}
                                                             </div>
                                                             <div style={styles.taskMeta}>
-                                                                {item.character
-                                                                    ? `${item.character.name} · ${item.character.classGroup}`
-                                                                    : group.title}
+                                                                {item.character ? item.character.name : group.title}
                                                             </div>
                                                             {item.task.description && (
                                                                 <div style={styles.taskDescription}>
