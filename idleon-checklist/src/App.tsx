@@ -3,9 +3,11 @@ import {
     charactersSeed,
     tasksSeed,
     type CharacterProfile,
+    type ClassGroup,
     type CompletionRecord,
     type Frequency,
     type Preferences,
+    type Priority,
     type TaskDefinition,
     type WorldFilter,
 } from './tasks';
@@ -36,6 +38,12 @@ type GroupedTasks = {
     items: RenderableTask[];
     completed: number;
     total: number;
+};
+
+type HiddenTaskEntry = {
+    key: string;
+    label: string;
+    frequency: Frequency;
 };
 
 type StoredPreferences = Partial<Preferences> & {
@@ -128,35 +136,33 @@ function normalizePreferences(value: StoredPreferences | undefined): Preferences
     };
 }
 
-function normalizeCharacters(value: CharacterProfile[] | undefined): CharacterProfile[] {
+function normalizeCharacters(value: unknown): CharacterProfile[] {
     if (!Array.isArray(value)) {
         return charactersSeed;
     }
 
-    return value.map((character, index) => ({
-        ...character,
-        classGroup: Array.isArray(character.classGroup)
-            ? character.classGroup
-            : [character.classGroup],
-        enabled: typeof character.enabled === 'boolean' ? character.enabled : true,
-        sortOrder: typeof character.sortOrder === 'number' ? character.sortOrder : index + 1,
-    }));
+    return value.map((item, index) => {
+        const character = item as Partial<CharacterProfile> & { classGroup?: ClassGroup[] | ClassGroup | string };
+
+        const rawClassGroup = character.classGroup;
+        const classGroup = Array.isArray(rawClassGroup)
+            ? (rawClassGroup as ClassGroup[])
+            : typeof rawClassGroup === 'string'
+                ? [rawClassGroup as ClassGroup]
+                : [];
+
+        return {
+            id: typeof character.id === 'string' ? character.id : `char-${index + 1}`,
+            name: typeof character.name === 'string' ? character.name : `Character ${index + 1}`,
+            classGroup,
+            enabled: typeof character.enabled === 'boolean' ? character.enabled : true,
+            sortOrder: typeof character.sortOrder === 'number' ? character.sortOrder : index + 1,
+        };
+    });
 }
 
 function capitalize(value: string): string {
     return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function priorityWeight(priority: TaskDefinition['priority']): number {
-    if (priority === 'high') {
-        return 3;
-    }
-
-    if (priority === 'medium') {
-        return 2;
-    }
-
-    return 1;
 }
 
 function getTaskGroupName(task: TaskDefinition): TaskGroupName {
@@ -178,6 +184,18 @@ function buttonStyle(active: boolean): React.CSSProperties {
     };
 }
 
+function priorityDotStyle(priority: Priority): React.CSSProperties {
+    if (priority === 'high') {
+        return { ...styles.priorityDot, background: '#f43f5e' };
+    }
+
+    if (priority === 'medium') {
+        return { ...styles.priorityDot, background: '#38bdf8' };
+    }
+
+    return { ...styles.priorityDot, background: '#94a3b8' };
+}
+
 function SectionTitle({ children }: { children: React.ReactNode }) {
     return <div style={styles.sectionTitle}>{children}</div>;
 }
@@ -188,10 +206,11 @@ export default function App() {
     const [search, setSearch] = useState('');
     const [showOptional, setShowOptional] = useState(true);
     const [selectedCharacterId, setSelectedCharacterId] = useState<string>('all');
+    const [priorityFilter, setPriorityFilter] = useState<'all' | Priority>('all');
 
     const [characters, setCharacters] = useState<CharacterProfile[]>(
-    () => normalizeCharacters(loadJson<CharacterProfile[]>(STORAGE_KEYS.characters, charactersSeed)),
-);
+        () => normalizeCharacters(loadJson<unknown>(STORAGE_KEYS.characters, charactersSeed)),
+    );
 
     const [completions, setCompletions] = useState<CompletionRecord[]>(
         () => loadJson<CompletionRecord[]>(STORAGE_KEYS.completions, []),
@@ -248,6 +267,10 @@ export default function App() {
                 continue;
             }
 
+            if (priorityFilter !== 'all' && task.priority !== priorityFilter) {
+                continue;
+            }
+
             if (worldFilter === 'favorites' && !preferences.favoriteTaskIds.includes(task.id)) {
                 continue;
             }
@@ -260,10 +283,7 @@ export default function App() {
                 continue;
             }
 
-            const matchesSearch = [
-                task.title,
-                task.description ?? '',
-            ]
+            const matchesSearch = [task.title, task.description ?? '']
                 .join(' ')
                 .toLowerCase()
                 .includes(search.toLowerCase());
@@ -328,9 +348,9 @@ export default function App() {
                     continue;
                 }
 
-const characterSearchMatches = `${task.title} ${character.name} ${character.classGroup.join(' ')}`
-    .toLowerCase()
-    .includes(search.toLowerCase());
+                const characterSearchMatches = `${task.title} ${character.name} ${character.classGroup.join(' ')}`
+                    .toLowerCase()
+                    .includes(search.toLowerCase());
 
                 if (search && !characterSearchMatches && !matchesSearch) {
                     continue;
@@ -353,20 +373,14 @@ const characterSearchMatches = `${task.title} ${character.name} ${character.clas
                 return groupDelta;
             }
 
-            const favoriteDelta =
-                Number(preferences.favoriteTaskIds.includes(b.task.id)) -
-                Number(preferences.favoriteTaskIds.includes(a.task.id));
-
-            if (favoriteDelta !== 0) {
-                return favoriteDelta;
+            const titleDelta = a.task.title.localeCompare(b.task.title);
+            if (titleDelta !== 0) {
+                return titleDelta;
             }
 
-            const priorityDelta = priorityWeight(b.task.priority) - priorityWeight(a.task.priority);
-            if (priorityDelta !== 0) {
-                return priorityDelta;
-            }
-
-            return a.task.title.localeCompare(b.task.title);
+            const aCharacter = a.character?.name ?? '';
+            const bCharacter = b.character?.name ?? '';
+            return aCharacter.localeCompare(bCharacter);
         });
     }, [
         completionSet,
@@ -376,6 +390,7 @@ const characterSearchMatches = `${task.title} ${character.name} ${character.clas
         preferences.favoriteTaskIds,
         preferences.hiddenTaskKeys,
         preferences.hideCompleted,
+        priorityFilter,
         search,
         selectedCharacterId,
         showOptional,
@@ -411,6 +426,36 @@ const characterSearchMatches = `${task.title} ${character.name} ${character.clas
             })
             .filter((group): group is GroupedTasks => group !== null);
     }, [renderableTasks]);
+
+    const hiddenTaskEntries = useMemo<HiddenTaskEntry[]>(() => {
+        return preferences.hiddenTaskKeys
+            .map((key) => {
+                const [taskId, rawCharacterId] = key.split('::');
+                const characterId = rawCharacterId === 'account' ? null : rawCharacterId;
+
+                const task = tasksSeed.find((item) => item.id === taskId);
+                const character = characterId
+                    ? characters.find((item) => item.id === characterId) ??
+                      charactersSeed.find((item) => item.id === characterId) ??
+                      null
+                    : null;
+
+                if (!task) {
+                    return {
+                        key,
+                        label: taskId,
+                        frequency: 'daily' as Frequency,
+                    };
+                }
+
+                return {
+                    key,
+                    label: character ? `${task.title} — ${character.name}` : task.title,
+                    frequency: task.frequency,
+                };
+            })
+            .sort((a, b) => a.label.localeCompare(b.label));
+    }, [characters, preferences.hiddenTaskKeys]);
 
     const stats = useMemo(() => {
         const total = renderableTasks.length;
@@ -472,6 +517,13 @@ const characterSearchMatches = `${task.title} ${character.name} ${character.clas
                 hiddenTaskKeys: [...current.hiddenTaskKeys, visibilityKey],
             };
         });
+    }
+
+    function unhideTask(visibilityKey: string): void {
+        setPreferences((current) => ({
+            ...current,
+            hiddenTaskKeys: current.hiddenTaskKeys.filter((key) => key !== visibilityKey),
+        }));
     }
 
     function resetCurrentFrequency(): void {
@@ -579,6 +631,24 @@ const characterSearchMatches = `${task.title} ${character.name} ${character.clas
                     </div>
 
                     <div style={styles.panel}>
+                        <SectionTitle>Priority</SectionTitle>
+                        <div style={styles.buttonGrid2}>
+                            <button style={buttonStyle(priorityFilter === 'all')} onClick={() => setPriorityFilter('all')} type="button">
+                                All
+                            </button>
+                            <button style={buttonStyle(priorityFilter === 'high')} onClick={() => setPriorityFilter('high')} type="button">
+                                High
+                            </button>
+                            <button style={buttonStyle(priorityFilter === 'medium')} onClick={() => setPriorityFilter('medium')} type="button">
+                                Medium
+                            </button>
+                            <button style={buttonStyle(priorityFilter === 'low')} onClick={() => setPriorityFilter('low')} type="button">
+                                Low
+                            </button>
+                        </div>
+                    </div>
+
+                    <div style={styles.panel}>
                         <SectionTitle>Worlds</SectionTitle>
                         <div style={styles.buttonGrid2}>
                             <button style={buttonStyle(worldFilter === 0)} onClick={() => setWorldFilter(0)} type="button">
@@ -632,6 +702,35 @@ const characterSearchMatches = `${task.title} ${character.name} ${character.clas
                                 </div>
                             ))}
                         </div>
+                    </div>
+
+                    <div style={styles.panel}>
+                        <div style={styles.sectionHeaderRow}>
+                            <SectionTitle>Hidden Tasks</SectionTitle>
+                            <span style={styles.smallBadge}>{hiddenTaskEntries.length}</span>
+                        </div>
+
+                        {hiddenTaskEntries.length === 0 ? (
+                            <div style={styles.muted}>No hidden tasks.</div>
+                        ) : (
+                            <div style={styles.hiddenList}>
+                                {hiddenTaskEntries.map((item) => (
+                                    <div key={item.key} style={styles.hiddenRow}>
+                                        <div style={styles.hiddenTaskTextWrap}>
+                                            <div style={styles.hiddenTaskLabel}>{item.label}</div>
+                                            <div style={styles.hiddenTaskMeta}>{capitalize(item.frequency)}</div>
+                                        </div>
+                                        <button
+                                            style={styles.unhideButton}
+                                            onClick={() => unhideTask(item.key)}
+                                            type="button"
+                                        >
+                                            Unhide
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </div>
 
                     <div style={styles.panel}>
@@ -724,16 +823,22 @@ const characterSearchMatches = `${task.title} ${character.name} ${character.clas
                                                             style={styles.checkbox}
                                                         />
                                                         <div style={styles.taskTextWrap}>
-                                                            <div
-                                                                style={{
-                                                                    ...styles.taskTitle,
-                                                                    ...(item.isComplete ? styles.taskTitleDone : {}),
-                                                                }}
-                                                            >
-                                                                {item.task.title}
-                                                            </div>
-                                                            <div style={styles.taskMeta}>
-                                                                {item.character ? item.character.name : group.title}
+                                                            <div style={styles.taskTitleRow}>
+                                                                <span
+                                                                    style={priorityDotStyle(item.task.priority)}
+                                                                    title={`Priority: ${capitalize(item.task.priority)}`}
+                                                                />
+                                                                <div
+                                                                    style={{
+                                                                        ...styles.taskTitle,
+                                                                        ...(item.isComplete ? styles.taskTitleDone : {}),
+                                                                    }}
+                                                                >
+                                                                    {item.task.title}
+                                                                </div>
+                                                                {item.task.optional && (
+                                                                    <span style={styles.optionalBadge}>Optional</span>
+                                                                )}
                                                             </div>
                                                             {item.task.description && (
                                                                 <div style={styles.taskDescription}>
@@ -1049,7 +1154,14 @@ const styles: Record<string, React.CSSProperties> = {
         minWidth: 0,
         display: 'flex',
         flexDirection: 'column',
-        gap: '3px',
+        gap: '4px',
+    },
+    taskTitleRow: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        flexWrap: 'wrap',
+        minWidth: 0,
     },
     taskTitle: {
         fontSize: '13px',
@@ -1060,11 +1172,6 @@ const styles: Record<string, React.CSSProperties> = {
     taskTitleDone: {
         textDecoration: 'line-through',
         color: '#94a3b8',
-    },
-    taskMeta: {
-        color: '#94a3b8',
-        fontSize: '11px',
-        lineHeight: 1.2,
     },
     taskDescription: {
         color: '#cbd5e1',
@@ -1087,6 +1194,69 @@ const styles: Record<string, React.CSSProperties> = {
         fontSize: '11px',
         fontWeight: 700,
         lineHeight: 1.2,
+        whiteSpace: 'nowrap',
+    },
+    priorityDot: {
+        width: '8px',
+        height: '8px',
+        borderRadius: '999px',
+        flexShrink: 0,
+        marginTop: '1px',
+    },
+    optionalBadge: {
+        background: 'rgba(245, 158, 11, 0.18)',
+        color: '#fde68a',
+        border: '1px solid rgba(245, 158, 11, 0.35)',
+        borderRadius: '999px',
+        padding: '2px 7px',
+        fontSize: '10px',
+        fontWeight: 700,
+        lineHeight: 1.2,
+    },
+    hiddenList: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        maxHeight: '220px',
+        overflowY: 'auto',
+        paddingRight: '4px',
+    },
+    hiddenRow: {
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) auto',
+        gap: '8px',
+        alignItems: 'center',
+        border: '1px solid #1e293b',
+        borderRadius: '12px',
+        padding: '8px 10px',
+        background: '#111827',
+    },
+    hiddenTaskTextWrap: {
+        minWidth: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '2px',
+    },
+    hiddenTaskLabel: {
+        fontSize: '12px',
+        color: '#e2e8f0',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+    },
+    hiddenTaskMeta: {
+        fontSize: '10px',
+        color: '#94a3b8',
+    },
+    unhideButton: {
+        background: '#1e293b',
+        color: '#e2e8f0',
+        border: '1px solid #334155',
+        borderRadius: '8px',
+        padding: '5px 8px',
+        cursor: 'pointer',
+        fontSize: '11px',
+        fontWeight: 700,
         whiteSpace: 'nowrap',
     },
 };
